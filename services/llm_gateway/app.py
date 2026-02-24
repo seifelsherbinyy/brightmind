@@ -4,7 +4,7 @@ import asyncio
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -32,8 +32,10 @@ logger = get_logger(__name__)
 # Pydantic models
 class ChatMessage(BaseModel):
     """Chat message model."""
-    role: str = Field(..., description="Message role (system, user, assistant)")
-    content: str = Field(..., description="Message content")
+    role: str = Field(..., description="Message role (system, user, assistant, tool)")
+    content: str = Field(default="", description="Message content")
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(default=None, description="Tool calls requested by the model")
+    tool_call_id: Optional[str] = Field(default=None, description="ID of the tool call this message responds to")
 
 
 class ChatRequest(BaseModel):
@@ -43,6 +45,7 @@ class ChatRequest(BaseModel):
     stream: bool = Field(default=False, description="Stream response")
     temperature: float = Field(default=0.7, ge=0, le=2, description="Sampling temperature")
     max_tokens: int = Field(default=2048, ge=1, le=8192, description="Maximum tokens")
+    tools: Optional[List[Dict[str, Any]]] = Field(default=None, description="Tool definitions for function calling")
 
 
 class ChatUsage(BaseModel):
@@ -114,9 +117,16 @@ class OllamaClient:
                 )
         
         # Convert messages to Ollama format
-        messages = [{"role": m.role, "content": m.content} for m in request.messages]
+        messages = []
+        for m in request.messages:
+            msg: Dict[str, Any] = {"role": m.role, "content": m.content}
+            if m.tool_calls:
+                msg["tool_calls"] = m.tool_calls
+            if m.tool_call_id:
+                msg["tool_call_id"] = m.tool_call_id
+            messages.append(msg)
         
-        ollama_request = {
+        ollama_request: Dict[str, Any] = {
             "model": request.model,
             "messages": messages,
             "stream": False,
@@ -125,6 +135,9 @@ class OllamaClient:
                 "num_predict": request.max_tokens
             }
         }
+
+        if request.tools:
+            ollama_request["tools"] = request.tools
         
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -149,13 +162,16 @@ class OllamaClient:
                     )
                 
                 data = response.json()
-                
+                resp_message = data.get("message", {})
+                tool_calls = resp_message.get("tool_calls")
+
                 return ChatResponse(
                     id=generate_message_id("msg"),
                     model=request.model,
                     message=ChatMessage(
                         role="assistant",
-                        content=data.get("message", {}).get("content", "")
+                        content=resp_message.get("content", ""),
+                        tool_calls=tool_calls,
                     ),
                     usage=ChatUsage(
                         prompt_tokens=data.get("prompt_eval_count", 0),
