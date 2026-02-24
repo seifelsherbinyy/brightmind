@@ -79,12 +79,24 @@ def sanitize_input(text: str, max_length: int = 4000) -> str:
     return text.strip()
 
 
+def _build_messages(
+    message: str,
+    system_prompt: Optional[str] = None,
+) -> list:
+    """Build the messages list from user input and optional system prompt."""
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": message})
+    return messages
+
+
 async def call_llm_gateway(
     message: str,
     model: Optional[str] = None,
     system_prompt: Optional[str] = None
 ) -> Optional[str]:
-    """Call LLM Gateway for response.
+    """Call LLM Gateway directly for response.
     
     Args:
         message: User message
@@ -96,10 +108,7 @@ async def call_llm_gateway(
     """
     gateway_url = f"http://{settings.llm_gateway.host}:{settings.llm_gateway.port}"
     
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": message})
+    messages = _build_messages(message, system_prompt)
     
     request_data = {
         "model": model or settings.ollama.default_model,
@@ -137,6 +146,104 @@ async def call_llm_gateway(
             logger.error("LLM Gateway call failed", error=str(e), attempt=attempt)
             if attempt > GATEWAY_RETRIES:
                 return None
+
+
+async def call_openclaw_adapter(
+    message: str,
+    model: Optional[str] = None,
+    system_prompt: Optional[str] = None
+) -> Optional[str]:
+    """Call LLM through the OpenClaw adapter (OpenAI-compatible endpoint).
+
+    Routes: slack_bot -> openclaw_adapter -> llm_gateway -> Ollama.
+
+    Args:
+        message: User message
+        model: Model to use (default from config)
+        system_prompt: Optional system prompt
+
+    Returns:
+        Assistant response or None on error
+    """
+    adapter_url = (
+        f"http://{settings.openclaw_adapter.host}:{settings.openclaw_adapter.port}"
+    )
+
+    messages = _build_messages(message, system_prompt)
+
+    request_data = {
+        "model": model or settings.ollama.default_model,
+        "messages": messages,
+        "temperature": settings.ollama.temperature,
+        "max_tokens": settings.ollama.max_tokens,
+        "stream": False,
+    }
+
+    for attempt in range(1, GATEWAY_RETRIES + 2):
+        try:
+            async with httpx.AsyncClient(timeout=GATEWAY_TIMEOUT_SECONDS) as client:
+                response = await client.post(
+                    f"{adapter_url}/v1/chat/completions",
+                    json=request_data,
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        return choices[0].get("message", {}).get("content", "")
+                    return None
+
+                logger.error(
+                    "OpenClaw adapter error",
+                    status_code=response.status_code,
+                    attempt=attempt,
+                    response=response.text,
+                )
+                if attempt > GATEWAY_RETRIES:
+                    return None
+        except httpx.TimeoutException:
+            logger.error("OpenClaw adapter timeout", attempt=attempt)
+            if attempt > GATEWAY_RETRIES:
+                return "Sorry, the request timed out. Please try again."
+        except Exception as e:
+            logger.error(
+                "OpenClaw adapter call failed", error=str(e), attempt=attempt
+            )
+            if attempt > GATEWAY_RETRIES:
+                return None
+
+
+async def get_llm_response(
+    message: str,
+    model: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+) -> Optional[str]:
+    """Unified router: picks the OpenClaw adapter or direct gateway path.
+
+    When ``settings.openclaw_adapter.enabled`` is *True* the request is
+    sent through the adapter first.  If the adapter call fails, the bot
+    falls back to the direct LLM Gateway path so the user still gets a
+    response.
+
+    Args:
+        message: User message
+        model: Model to use (default from config)
+        system_prompt: Optional system prompt
+
+    Returns:
+        Assistant response or None on error
+    """
+    if settings.openclaw_adapter.enabled:
+        logger.info("Routing through OpenClaw adapter")
+        result = await call_openclaw_adapter(message, model, system_prompt)
+        if result is not None:
+            return result
+        logger.warning(
+            "OpenClaw adapter failed, falling back to direct LLM Gateway"
+        )
+
+    return await call_llm_gateway(message, model, system_prompt)
 
 
 # Initialize Bolt app
@@ -190,9 +297,9 @@ def handle_app_mention(event: dict, say, client):
     except Exception:
         pass  # Ignore if not supported
     
-    # Call LLM Gateway
+    # Call LLM (via OpenClaw adapter when enabled, otherwise direct gateway)
     import asyncio
-    response = asyncio.run(call_llm_gateway(clean_text))
+    response = asyncio.run(get_llm_response(clean_text))
     
     if response:
         say(text=response, thread_ts=thread_ts)
@@ -242,14 +349,14 @@ def handle_message(event: dict, say, client):
     except Exception:
         pass
     
-    # Call LLM Gateway
+    # Call LLM (via OpenClaw adapter when enabled, otherwise direct gateway)
     import asyncio
     
     system_prompt = """You are BrightMind, a helpful AI assistant running locally on the user's machine.
 You have access to a local LLM and can help with coding, analysis, writing, and general questions.
 Be concise but thorough in your responses."""
     
-    response = asyncio.run(call_llm_gateway(text, system_prompt=system_prompt))
+    response = asyncio.run(get_llm_response(text, system_prompt=system_prompt))
     
     if response:
         say(text=response)
@@ -280,17 +387,50 @@ You can also DM me or @mention me in channels!"""
         import asyncio
         
         async def check_status():
+            lines = []
             gateway_url = f"http://{settings.llm_gateway.host}:{settings.llm_gateway.port}"
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
                     response = await client.get(f"{gateway_url}/health")
                     if response.status_code == 200:
                         data = response.json()
-                        return f"✅ LLM Gateway: {data.get('ollama', 'unknown')} | Model: {data.get('model', 'unknown')}"
+                        lines.append(
+                            f"✅ LLM Gateway: {data.get('ollama', 'unknown')} "
+                            f"| Model: {data.get('model', 'unknown')}"
+                        )
                     else:
-                        return f"❌ LLM Gateway: HTTP {response.status_code}"
+                        lines.append(f"❌ LLM Gateway: HTTP {response.status_code}")
             except Exception as e:
-                return f"❌ LLM Gateway: {str(e)}"
+                lines.append(f"❌ LLM Gateway: {str(e)}")
+
+            if settings.openclaw_adapter.enabled:
+                adapter_url = (
+                    f"http://{settings.openclaw_adapter.host}"
+                    f":{settings.openclaw_adapter.port}"
+                )
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        response = await client.get(f"{adapter_url}/health")
+                        if response.status_code == 200:
+                            data = response.json()
+                            mode = data.get("mode", "unknown")
+                            gw = data.get("llm_gateway", "unknown")
+                            lines.append(
+                                f"✅ OpenClaw Adapter: mode={mode} "
+                                f"| gateway={gw}"
+                            )
+                        else:
+                            lines.append(
+                                f"❌ OpenClaw Adapter: HTTP {response.status_code}"
+                            )
+                except Exception as e:
+                    lines.append(f"❌ OpenClaw Adapter: {str(e)}")
+            else:
+                lines.append("ℹ️ OpenClaw Adapter: disabled")
+
+            routing = "OpenClaw → Gateway" if settings.openclaw_adapter.enabled else "Direct Gateway"
+            lines.append(f"🔀 Routing: {routing}")
+            return "\n".join(lines)
         
         status = asyncio.run(check_status())
         say(text=f"*BrightMind Status*\n{status}")
@@ -300,7 +440,7 @@ You can also DM me or @mention me in channels!"""
     else:
         # Treat as a query
         import asyncio
-        response = asyncio.run(call_llm_gateway(text))
+        response = asyncio.run(get_llm_response(text))
         if response:
             say(text=response)
         else:
@@ -315,7 +455,14 @@ def global_error_handler(error, body, logger):
 
 def main():
     """Main entry point."""
-    logger.info("Starting Slack Bot", socket_mode=settings.slack.socket_mode)
+    routing = "openclaw_adapter" if settings.openclaw_adapter.enabled else "direct_gateway"
+    logger.info(
+        "Starting Slack Bot",
+        socket_mode=settings.slack.socket_mode,
+        routing=routing,
+        openclaw_enabled=settings.openclaw_adapter.enabled,
+        openclaw_dry_run=settings.openclaw_adapter.dry_run,
+    )
     
     # Validate configuration
     if not settings.slack.bot_token:
