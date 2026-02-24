@@ -1,4 +1,4 @@
-﻿# Architecture - BrightMind
+# Architecture - BrightMind
 
 Version: 1.1
 
@@ -15,11 +15,18 @@ Version: 1.1
 4. `llm_gateway` calls Ollama `/api/chat`.
 5. Response is returned to Slack.
 
-## Flow B: OpenClaw Orchestrated
-1. OpenClaw (or Slack through OpenClaw) calls `openclaw_adapter`.
+## Flow B: OpenClaw Orchestrated (external)
+1. External OpenClaw platform calls `openclaw_adapter`.
 2. Adapter maps request to gateway-compatible payload.
 3. In dry-run mode, adapter returns deterministic stub response.
 4. In active mode, adapter forwards to `llm_gateway`.
+
+## Flow C: Slack via OpenClaw Adapter
+1. Slack event arrives via Socket Mode (same as Flow A).
+2. `slack_bot` checks `OPENCLAW_ENABLED`. If *true*, routes to `openclaw_adapter`.
+3. Adapter processes the request (dry-run stub or live forwarding to `llm_gateway`).
+4. If the adapter call fails, `slack_bot` falls back to direct `llm_gateway` (Flow A).
+5. Response is returned to Slack.
 
 ## Service Interfaces
 - `GET /health` (gateway): returns `status`, `readiness`, `ollama`, `hint`.
@@ -45,3 +52,4 @@ Order of precedence:
 - Missing model: gateway returns clear command for `download_model.ps1`.
 - Missing Slack tokens: doctor fails deterministically.
 - OpenClaw unavailable: direct mode still works.
+- Adapter failure in Flow C: `slack_bot` automatically falls back to direct gateway.
