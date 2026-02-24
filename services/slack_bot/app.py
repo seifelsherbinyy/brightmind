@@ -274,6 +274,23 @@ def _extract_tool_call_from_content(
     return [{"function": {"name": name, "arguments": raw_args}}]
 
 
+def _render_tool_result_for_user(result: str) -> str:
+    """Render a compact user-facing message from a tool result payload."""
+    try:
+        parsed = json.loads(result)
+    except json.JSONDecodeError:
+        return result
+
+    if isinstance(parsed, dict):
+        if "error" in parsed:
+            return f"Tool error: {parsed['error']}"
+        if "result" in parsed:
+            return str(parsed["result"])
+        if "utc" in parsed:
+            return parsed.get("utc", result)
+    return json.dumps(parsed)
+
+
 async def get_llm_response(
     conversation_id: str,
     user_message: str,
@@ -292,6 +309,7 @@ async def get_llm_response(
     conversations.append(conversation_id, "user", user_message)
 
     tools = get_tool_definitions()
+    last_tool_result: Optional[str] = None
 
     for _round in range(MAX_TOOL_ROUNDS):
         messages = conversations.get_history(conversation_id, system_prompt=prompt)
@@ -338,6 +356,7 @@ async def get_llm_response(
 
             logger.info("Executing tool", tool=name, args=raw_args)
             result = execute_tool(name, raw_args)
+            last_tool_result = result
             conversations.append(conversation_id, "tool", result)
 
     # Fell through the loop — do one final call without tools
@@ -345,6 +364,10 @@ async def get_llm_response(
     data = await _call_llm_backend(messages, model=model)
     if data:
         content = data.get("message", {}).get("content", "")
+        if last_tool_result and _extract_tool_call_from_content(content, tools):
+            final_text = _render_tool_result_for_user(last_tool_result)
+            conversations.append(conversation_id, "assistant", final_text)
+            return final_text
         if content:
             conversations.append(conversation_id, "assistant", content)
         return content or None
