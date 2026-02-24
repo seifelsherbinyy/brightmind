@@ -1,0 +1,152 @@
+﻿{
+    "title":  "Brightmind Local Stack Readiness Report",
+    "version":  "1.0",
+    "generated_at":  "2026-02-24T13:07:14",
+    "repo_path":  "D:\\brightmind",
+    "artifacts_path":  "D:\\brightmind\\artifacts\\readiness\\20260224-130707",
+    "verdict":  {
+                    "local_mode_go":  true,
+                    "live_integration_go":  false,
+                    "pass_count":  11,
+                    "fail_count":  0,
+                    "unknown_count":  1
+                },
+    "environment":  {
+                        "python_version":  "Python 3.12.4",
+                        "ollama_version":  "ollama version is 0.17.0",
+                        "models":  "qwen2.5-coder:7b    dae161e27b0e    4.7 GB    2 hours ago",
+                        "gateway":  {
+                                        "host":  "127.0.0.1",
+                                        "port":  8080
+                                    },
+                        "adapter":  {
+                                        "host":  "127.0.0.1",
+                                        "port":  8081
+                                    }
+                    },
+    "checks":  [
+                   {
+                       "check_id":  "REPO_RUNALL",
+                       "category":  "repo",
+                       "status":  "PASS",
+                       "severity":  "critical",
+                       "evidence":  "run_all.ps1 present",
+                       "remediation":  "none",
+                       "commands_run":  "Test-Path",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "API_GATEWAY_HEALTH",
+                       "category":  "service",
+                       "status":  "PASS",
+                       "severity":  "critical",
+                       "evidence":  "status=ok readiness=ready",
+                       "remediation":  "none",
+                       "commands_run":  "GET /health",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "OPENCLAW_ADAPTER_HEALTH",
+                       "category":  "service",
+                       "status":  "PASS",
+                       "severity":  "high",
+                       "evidence":  "status=ok mode=dry_run",
+                       "remediation":  "none",
+                       "commands_run":  "GET /health",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "PYTHON_VERSION",
+                       "category":  "deps",
+                       "status":  "PASS",
+                       "severity":  "critical",
+                       "evidence":  "Python 3.12.4",
+                       "remediation":  "none",
+                       "commands_run":  "python --version",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "OLLAMA_VERSION",
+                       "category":  "deps",
+                       "status":  "PASS",
+                       "severity":  "critical",
+                       "evidence":  "ollama version is 0.17.0",
+                       "remediation":  "none",
+                       "commands_run":  "ollama --version",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "MODEL_AVAILABLE",
+                       "category":  "model",
+                       "status":  "PASS",
+                       "severity":  "critical",
+                       "evidence":  "model qwen2.5-coder:7b present",
+                       "remediation":  "none",
+                       "commands_run":  "ollama list",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "SLACK_CREDS_READY",
+                       "category":  "integration",
+                       "status":  "UNKNOWN",
+                       "severity":  "high",
+                       "evidence":  "tokens not configured (offline mode)",
+                       "remediation":  "configure for live integration later",
+                       "commands_run":  "parse .env",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "GATEWAY_BIND_LOCALHOST",
+                       "category":  "security",
+                       "status":  "PASS",
+                       "severity":  "critical",
+                       "evidence":  "bind 127.0.0.1:8080",
+                       "remediation":  "none",
+                       "commands_run":  "config/env",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "ADAPTER_BIND_LOCALHOST",
+                       "category":  "security",
+                       "status":  "PASS",
+                       "severity":  "critical",
+                       "evidence":  "bind 127.0.0.1:8081",
+                       "remediation":  "none",
+                       "commands_run":  "config/env",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "SMOKE_GATEWAY_CHAT",
+                       "category":  "smoke",
+                       "status":  "PASS",
+                       "severity":  "critical",
+                       "evidence":  "deterministic ok in 1.03s",
+                       "remediation":  "none",
+                       "commands_run":  "POST /chat",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "PERF_CHAT_LATENCY",
+                       "category":  "performance",
+                       "status":  "PASS",
+                       "severity":  "medium",
+                       "evidence":  "latency=1.03s",
+                       "remediation":  "none",
+                       "commands_run":  "POST /chat latency",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "SMOKE_ADAPTER_DRY_RUN",
+                       "category":  "smoke",
+                       "status":  "PASS",
+                       "severity":  "high",
+                       "evidence":  "dry-run marker found",
+                       "remediation":  "none",
+                       "commands_run":  "POST /v1/chat/completions",
+                       "failure_code":  "none"
+                   }
+               ],
+    "commands_run":  [
+
+                     ]
+}

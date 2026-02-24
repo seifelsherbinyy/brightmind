@@ -1,0 +1,9 @@
+﻿{
+    "adapter_pid":  1684,
+    "adapter_host":  "127.0.0.1",
+    "gateway_port":  8080,
+    "gateway_host":  "127.0.0.1",
+    "adapter_port":  8081,
+    "run_all_pid":  4864,
+    "default_model":  "qwen2.5-coder:7b"
+}

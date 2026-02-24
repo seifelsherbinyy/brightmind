@@ -1,0 +1,92 @@
+﻿{
+    "title":  "Brightmind Local Stack Readiness Report",
+    "version":  "1.0",
+    "generated_at":  "2026-02-24T13:09:18",
+    "repo_path":  "D:\\brightmind",
+    "artifacts_path":  "D:\\brightmind\\artifacts\\readiness\\20260224-130917",
+    "verdict":  {
+                    "local_mode_go":  true,
+                    "live_integration_go":  false,
+                    "pass_count":  3,
+                    "fail_count":  0,
+                    "unknown_count":  3
+                },
+    "environment":  {
+                        "python_version":  "Python 3.12.4",
+                        "ollama_version":  "ollama version is 0.17.0",
+                        "models":  "qwen2.5-coder:7b    dae161e27b0e    4.7 GB    2 hours ago",
+                        "gateway":  {
+                                        "host":  null,
+                                        "port":  null
+                                    },
+                        "adapter":  {
+                                        "host":  null,
+                                        "port":  null
+                                    }
+                    },
+    "checks":  [
+                   {
+                       "check_id":  "PYTHON_VERSION",
+                       "category":  "deps",
+                       "status":  "PASS",
+                       "severity":  "critical",
+                       "evidence":  "Python 3.12.4",
+                       "remediation":  "none",
+                       "commands_run":  "python --version",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "OLLAMA_VERSION",
+                       "category":  "deps",
+                       "status":  "PASS",
+                       "severity":  "critical",
+                       "evidence":  "ollama version is 0.17.0",
+                       "remediation":  "none",
+                       "commands_run":  "ollama --version",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "MODEL_AVAILABLE",
+                       "category":  "model",
+                       "status":  "PASS",
+                       "severity":  "critical",
+                       "evidence":  "model qwen2.5-coder:7b present",
+                       "remediation":  "none",
+                       "commands_run":  "ollama list",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "SLACK_CREDS_READY",
+                       "category":  "integration",
+                       "status":  "UNKNOWN",
+                       "severity":  "high",
+                       "evidence":  "tokens not configured (offline mode)",
+                       "remediation":  "configure for live integration later",
+                       "commands_run":  "parse .env",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "GATEWAY_BIND_LOCALHOST",
+                       "category":  "network",
+                       "status":  "UNKNOWN",
+                       "severity":  "high",
+                       "evidence":  "unknown host/port",
+                       "remediation":  "run Start first",
+                       "commands_run":  "state",
+                       "failure_code":  "none"
+                   },
+                   {
+                       "check_id":  "ADAPTER_BIND_LOCALHOST",
+                       "category":  "network",
+                       "status":  "UNKNOWN",
+                       "severity":  "high",
+                       "evidence":  "unknown host/port",
+                       "remediation":  "run Start first",
+                       "commands_run":  "state",
+                       "failure_code":  "none"
+                   }
+               ],
+    "commands_run":  [
+
+                     ]
+}

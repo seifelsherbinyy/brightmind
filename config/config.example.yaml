@@ -1,0 +1,38 @@
+﻿app:
+  name: "BrightMind"
+  version: "1.1.0"
+  log_level: "INFO"
+  data_dir: "D:/brightmind/data"
+
+services:
+  llm_gateway:
+    enabled: true
+    host: "127.0.0.1"
+    port: 8080
+    ollama_url: "http://localhost:11434"
+    timeout: 30
+    max_tokens: 2048
+
+  slack_bot:
+    enabled: true
+    socket_mode: true
+    mention_only_in_channels: true
+    max_message_length: 4000
+    rate_limit_per_minute: 30
+    allowed_channels: []
+
+  openclaw_adapter:
+    enabled: false
+    host: "127.0.0.1"
+    port: 8081
+    openclaw_gateway_url: "http://localhost:18789"
+
+models:
+  default: "qwen2.5-coder:7b"
+  fallback: "llama3.2:3b"
+  temperature: 0.7
+
+security:
+  allow_shell_commands: false
+  max_input_length: 10000
+  require_mention_in_groups: true
