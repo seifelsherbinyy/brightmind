@@ -1,6 +1,5 @@
 """LLM Gateway - FastAPI service for local LLM inference via Ollama."""
 
-import asyncio
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -40,7 +39,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     """Chat completion request."""
-    model: str = Field(default="qwen2.5-coder:7b", description="Model to use")
+    model: str = Field(default=settings.ollama.default_model, description="Model to use")
     messages: List[ChatMessage] = Field(..., description="Conversation messages")
     stream: bool = Field(default=False, description="Stream response")
     temperature: float = Field(default=0.7, ge=0, le=2, description="Sampling temperature")
@@ -79,7 +78,7 @@ class OllamaClient:
     def __init__(self, base_url: str = "http://localhost:11434"):
         self.base_url = base_url.rstrip("/")
         self._available = False
-        self._default_model = "qwen2.5-coder:7b"
+        self._default_model = settings.ollama.default_model
     
     async def check_health(self) -> dict:
         """Check Ollama server health."""

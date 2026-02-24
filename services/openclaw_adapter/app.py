@@ -55,6 +55,8 @@ class ChatMessage(BaseModel):
     role: str = Field(..., description="Message role (system, user, assistant, tool)")
     content: str = Field(..., description="Message content")
     name: Optional[str] = Field(default=None, description="Name for tool messages")
+    tool_calls: Optional[List[dict]] = Field(default=None, description="Tool calls requested by the model")
+    tool_call_id: Optional[str] = Field(default=None, description="Tool call ID for tool result messages")
 
 
 class ChatCompletionRequest(BaseModel):
@@ -70,6 +72,7 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: Optional[float] = Field(default=0, ge=-2, le=2)
     frequency_penalty: Optional[float] = Field(default=0, ge=-2, le=2)
     user: Optional[str] = Field(default=None)
+    tools: Optional[List[dict]] = Field(default=None, description="Tool definitions for function calling")
 
 
 class ChatCompletionChoice(BaseModel):
@@ -188,13 +191,24 @@ class OpenClawAdapter:
                 )
         
         # Convert to LLM Gateway format
+        gateway_messages = []
+        for m in request.messages:
+            msg = {"role": m.role, "content": m.content}
+            if m.tool_calls:
+                msg["tool_calls"] = m.tool_calls
+            if m.tool_call_id:
+                msg["tool_call_id"] = m.tool_call_id
+            gateway_messages.append(msg)
+
         gateway_request = {
             "model": request.model,
-            "messages": [{"role": m.role, "content": m.content} for m in request.messages],
+            "messages": gateway_messages,
             "stream": request.stream,
             "temperature": request.temperature or 0.7,
             "max_tokens": request.max_tokens or 2048
         }
+        if request.tools:
+            gateway_request["tools"] = request.tools
         
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -216,15 +230,20 @@ class OpenClawAdapter:
                 
                 data = response.json()
                 
+                response_message = data.get("message", {})
+                tool_calls = response_message.get("tool_calls")
+                finish_reason = "tool_calls" if tool_calls else "stop"
+
                 return ChatCompletionResponse(
                     model=request.model,
                     choices=[
                         ChatCompletionChoice(
                             message=ChatMessage(
                                 role="assistant",
-                                content=data.get("message", {}).get("content", "")
+                                content=response_message.get("content", ""),
+                                tool_calls=tool_calls,
                             ),
-                            finish_reason="stop"
+                            finish_reason=finish_reason
                         )
                     ],
                     usage=ChatCompletionUsage(

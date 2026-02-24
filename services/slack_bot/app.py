@@ -24,7 +24,6 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from common.config import get_settings
 from common.conversation_store import ConversationStore
 from common.logger import configure_logging, get_logger
-from common.message_id import generate_message_id
 
 # Configure logging
 settings = get_settings()
@@ -148,6 +147,150 @@ async def _call_gateway(
     return None
 
 
+async def _call_openclaw_adapter(
+    messages: List[Dict[str, Any]],
+    model: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Call OpenClaw adapter and normalize response to gateway-like shape."""
+    adapter_url = (
+        f"http://{settings.openclaw_adapter.host}"
+        f":{settings.openclaw_adapter.port}"
+    )
+    request_data: Dict[str, Any] = {
+        "model": model or settings.ollama.default_model,
+        "messages": messages,
+        "stream": False,
+        "temperature": settings.ollama.temperature,
+        "max_tokens": settings.ollama.max_tokens,
+    }
+    if tools:
+        request_data["tools"] = tools
+
+    for attempt in range(1, GATEWAY_RETRIES + 2):
+        try:
+            async with httpx.AsyncClient(timeout=GATEWAY_TIMEOUT_SECONDS) as client:
+                response = await client.post(
+                    f"{adapter_url}/v1/chat/completions",
+                    json=request_data,
+                )
+                if response.status_code == 200:
+                    payload = response.json()
+                    choices = payload.get("choices") or []
+                    message = choices[0].get("message", {}) if choices else {}
+                    return {
+                        "id": payload.get("id", ""),
+                        "model": payload.get("model", request_data["model"]),
+                        "message": {
+                            "role": message.get("role", "assistant"),
+                            "content": message.get("content", ""),
+                            "tool_calls": message.get("tool_calls"),
+                        },
+                        "usage": payload.get("usage", {}),
+                    }
+
+                logger.error(
+                    "OpenClaw adapter error",
+                    status_code=response.status_code,
+                    attempt=attempt,
+                    response=response.text,
+                )
+                if attempt > GATEWAY_RETRIES:
+                    return None
+        except httpx.TimeoutException:
+            logger.error("OpenClaw adapter timeout", attempt=attempt)
+            if attempt > GATEWAY_RETRIES:
+                return None
+        except Exception as e:
+            logger.error("OpenClaw adapter call failed", error=str(e), attempt=attempt)
+            if attempt > GATEWAY_RETRIES:
+                return None
+    return None
+
+
+async def _call_llm_backend(
+    messages: List[Dict[str, Any]],
+    model: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Call configured backend: adapter when enabled, else direct gateway."""
+    if settings.openclaw_adapter.enabled:
+        logger.info("Routing via OpenClaw adapter")
+        adapter_response = await _call_openclaw_adapter(messages, model=model, tools=tools)
+        if adapter_response is not None:
+            return adapter_response
+        logger.warning("OpenClaw adapter failed, falling back to direct gateway")
+
+    return await _call_gateway(messages, model=model, tools=tools)
+
+
+def _is_memory_reset_command(text: str) -> bool:
+    return text.strip().lower() in {"reset", "reset memory", "/reset"}
+
+
+def _extract_tool_call_from_content(
+    content: str,
+    tools: List[Dict[str, Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    """Best-effort parser for small models that emit tool JSON as plain text."""
+    text = content.strip()
+    if not text:
+        return None
+
+    # Accept fenced JSON blocks and raw JSON objects.
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3:
+            text = "\n".join(lines[1:-1]).strip()
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    available = {
+        t.get("function", {}).get("name")
+        for t in tools
+        if isinstance(t, dict)
+    }
+
+    name = payload.get("name")
+    raw_args = payload.get("arguments", {})
+
+    if not isinstance(name, str) or name not in available:
+        return None
+
+    if isinstance(raw_args, str):
+        try:
+            raw_args = json.loads(raw_args)
+        except json.JSONDecodeError:
+            raw_args = {}
+    if not isinstance(raw_args, dict):
+        raw_args = {}
+
+    return [{"function": {"name": name, "arguments": raw_args}}]
+
+
+def _render_tool_result_for_user(result: str) -> str:
+    """Render a compact user-facing message from a tool result payload."""
+    try:
+        parsed = json.loads(result)
+    except json.JSONDecodeError:
+        return result
+
+    if isinstance(parsed, dict):
+        if "error" in parsed:
+            return f"Tool error: {parsed['error']}"
+        if "result" in parsed:
+            return str(parsed["result"])
+        if "utc" in parsed:
+            return parsed.get("utc", result)
+    return json.dumps(parsed)
+
+
 async def get_llm_response(
     conversation_id: str,
     user_message: str,
@@ -166,10 +309,11 @@ async def get_llm_response(
     conversations.append(conversation_id, "user", user_message)
 
     tools = get_tool_definitions()
+    last_tool_result: Optional[str] = None
 
     for _round in range(MAX_TOOL_ROUNDS):
         messages = conversations.get_history(conversation_id, system_prompt=prompt)
-        data = await _call_gateway(messages, model=model, tools=tools)
+        data = await _call_llm_backend(messages, model=model, tools=tools)
 
         if data is None:
             return None
@@ -177,6 +321,14 @@ async def get_llm_response(
         assistant_msg = data.get("message", {})
         content = assistant_msg.get("content", "")
         tool_calls = assistant_msg.get("tool_calls")
+
+        if not tool_calls:
+            tool_calls = _extract_tool_call_from_content(content, tools)
+            if tool_calls:
+                logger.info(
+                    "Inferred tool call from assistant content",
+                    tool=tool_calls[0].get("function", {}).get("name"),
+                )
 
         if not tool_calls:
             if content:
@@ -204,13 +356,18 @@ async def get_llm_response(
 
             logger.info("Executing tool", tool=name, args=raw_args)
             result = execute_tool(name, raw_args)
+            last_tool_result = result
             conversations.append(conversation_id, "tool", result)
 
     # Fell through the loop — do one final call without tools
     messages = conversations.get_history(conversation_id, system_prompt=prompt)
-    data = await _call_gateway(messages, model=model)
+    data = await _call_llm_backend(messages, model=model)
     if data:
         content = data.get("message", {}).get("content", "")
+        if last_tool_result and _extract_tool_call_from_content(content, tools):
+            final_text = _render_tool_result_for_user(last_tool_result)
+            conversations.append(conversation_id, "assistant", final_text)
+            return final_text
         if content:
             conversations.append(conversation_id, "assistant", content)
         return content or None
@@ -258,6 +415,12 @@ def handle_app_mention(event: dict, say, client):
     if not clean_text:
         say(text="Hello! How can I help you today?", thread_ts=thread_ts)
         return
+
+    conv_id = _conversation_key(channel, thread_ts)
+    if _is_memory_reset_command(clean_text):
+        conversations.clear(conv_id)
+        say(text="Conversation memory reset for this thread.", thread_ts=thread_ts)
+        return
     
     try:
         client.assistant_threads_setStatus(
@@ -269,7 +432,6 @@ def handle_app_mention(event: dict, say, client):
         pass
 
     import asyncio
-    conv_id = _conversation_key(channel, thread_ts)
     response = asyncio.run(get_llm_response(conv_id, clean_text))
     
     if response:
@@ -304,6 +466,12 @@ def handle_message(event: dict, say, client):
     if not text:
         say(text="Hello! How can I help you today?")
         return
+
+    conv_id = _conversation_key(channel, thread_ts)
+    if _is_memory_reset_command(text):
+        conversations.clear(conv_id)
+        say(text="Conversation memory reset for this DM thread.")
+        return
     
     try:
         client.assistant_threads_setStatus(
@@ -314,7 +482,6 @@ def handle_message(event: dict, say, client):
         pass
 
     import asyncio
-    conv_id = _conversation_key(channel, thread_ts)
     response = asyncio.run(get_llm_response(conv_id, text))
     
     if response:
@@ -338,6 +505,7 @@ def handle_command(ack, command: dict, say):
             text="""*BrightMind Commands:*
 • `/brightmind help` - Show this help
 • `/brightmind status` - Check service status
+• `/brightmind reset` - Reset slash-command conversation memory
 • `/brightmind model [name]` - Show or set model
 
 You can also DM me or @mention me in channels!"""
@@ -393,9 +561,17 @@ You can also DM me or @mention me in channels!"""
         
         status = asyncio.run(check_status())
         say(text=f"*BrightMind Status*\n{status}")
+    elif text == "reset":
+        conversations.clear(f"cmd:{user}")
+        say(text="Slash-command conversation memory reset.")
     elif text.startswith("model "):
         model_name = text[6:].strip()
-        say(text=f"Model switching not yet implemented. Current: {settings.ollama.default_model}")
+        say(
+            text=(
+                f"Model switching not yet implemented. "
+                f"Requested: {model_name}. Current: {settings.ollama.default_model}"
+            )
+        )
     else:
         # Treat as a query
         import asyncio
