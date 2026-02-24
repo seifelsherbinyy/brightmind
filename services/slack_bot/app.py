@@ -228,6 +228,52 @@ def _is_memory_reset_command(text: str) -> bool:
     return text.strip().lower() in {"reset", "reset memory", "/reset"}
 
 
+def _extract_tool_call_from_content(
+    content: str,
+    tools: List[Dict[str, Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    """Best-effort parser for small models that emit tool JSON as plain text."""
+    text = content.strip()
+    if not text:
+        return None
+
+    # Accept fenced JSON blocks and raw JSON objects.
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3:
+            text = "\n".join(lines[1:-1]).strip()
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    available = {
+        t.get("function", {}).get("name")
+        for t in tools
+        if isinstance(t, dict)
+    }
+
+    name = payload.get("name")
+    raw_args = payload.get("arguments", {})
+
+    if not isinstance(name, str) or name not in available:
+        return None
+
+    if isinstance(raw_args, str):
+        try:
+            raw_args = json.loads(raw_args)
+        except json.JSONDecodeError:
+            raw_args = {}
+    if not isinstance(raw_args, dict):
+        raw_args = {}
+
+    return [{"function": {"name": name, "arguments": raw_args}}]
+
+
 async def get_llm_response(
     conversation_id: str,
     user_message: str,
@@ -257,6 +303,14 @@ async def get_llm_response(
         assistant_msg = data.get("message", {})
         content = assistant_msg.get("content", "")
         tool_calls = assistant_msg.get("tool_calls")
+
+        if not tool_calls:
+            tool_calls = _extract_tool_call_from_content(content, tools)
+            if tool_calls:
+                logger.info(
+                    "Inferred tool call from assistant content",
+                    tool=tool_calls[0].get("function", {}).get("name"),
+                )
 
         if not tool_calls:
             if content:
