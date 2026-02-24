@@ -52,6 +52,24 @@ When `OPENCLAW_ENABLED=true` in `.env`, the `slack_bot` routes messages through 
 - **Slack scopes**: The bot token has `chat:write`, `app_mentions:read`, `im:read`, `channels:read` but **not** `channels:join` or `im:history`. It cannot join channels programmatically or read message history. Users must invite the bot to channels manually via Slack.
 - **structlog warnings**: When running services inline (e.g. in test scripts), structlog may emit `AttributeError: 'NoneType' object has no attribute 'disabled'` warnings. These are harmless logging context clashes and do not affect functionality.
 
+### Conversation memory
+
+The `slack_bot` maintains per-thread message history via `ConversationStore` (in `services/common/conversation_store.py`). Conversations are keyed by `channel:thread_ts` (or just `channel` for top-level DMs). History is in-memory with 1-hour TTL and 20-message cap. No persistence across restarts (Phase 2 roadmap item).
+
+### Tool / function calling
+
+The bot sends tool definitions to Ollama alongside each request. When the model responds with `tool_calls`, the bot executes them and feeds results back in a loop (up to `BRIGHTMIND_MAX_TOOL_ROUNDS`, default 5). Built-in tools are defined in `services/slack_bot/tools.py`:
+
+| Tool | Description |
+|---|---|
+| `get_current_datetime` | Returns current UTC date/time |
+| `web_fetch` | Fetches a URL and returns the body text (max 4KB) |
+| `service_status` | Checks health of gateway, adapter, and Ollama |
+| `list_models` | Lists available Ollama models |
+| `calculate` | Evaluates a math expression safely |
+
+Tool calling quality depends on the model — `qwen2.5-coder:7b` handles it well; the 0.5b variant may not invoke tools reliably.
+
 ### Linting
 
 ```bash
