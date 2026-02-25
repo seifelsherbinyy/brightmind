@@ -101,6 +101,23 @@ SYSTEM_PROMPT = (
     "Be concise but thorough in your responses."
 )
 
+def _is_ignorable_message_event(event: dict) -> bool:
+    """Return True for message events we should not respond to.
+
+    Slack will emit message events for bot messages, message edits, joins, etc.
+    Responding to our own messages can create loops that look like "the bot is broken".
+    """
+    if not isinstance(event, dict):
+        return True
+    if event.get("bot_id"):
+        return True
+    if event.get("subtype"):
+        # Includes: bot_message, message_changed, channel_join, etc.
+        return True
+    if not event.get("text"):
+        return True
+    return False
+
 
 async def _call_gateway(
     messages: List[Dict[str, Any]],
@@ -147,6 +164,51 @@ async def _call_gateway(
     return None
 
 
+async def _call_openclaw_adapter(
+    messages: List[Dict[str, Any]],
+    model: Optional[str] = None,
+) -> Optional[str]:
+    """Call the OpenClaw adapter (OpenAI-compatible) and return assistant text.
+
+    This is used when OPENCLAW_ENABLED=true. In OPENCLAW_DRY_RUN mode, the adapter
+    returns a deterministic stub response and does not require Ollama or the gateway.
+    """
+    adapter_url = f"http://{settings.openclaw_adapter.host}:{settings.openclaw_adapter.port}"
+    request_data: Dict[str, Any] = {
+        "model": model or settings.ollama.default_model,
+        "messages": [{"role": m.get("role", ""), "content": m.get("content", "")} for m in messages],
+        "stream": False,
+        "temperature": settings.ollama.temperature,
+        "max_tokens": settings.ollama.max_tokens,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(f"{adapter_url}/v1/chat/completions", json=request_data)
+        if response.status_code != 200:
+            logger.error(
+                "OpenClaw adapter error",
+                status_code=response.status_code,
+                response=response.text,
+            )
+            return None
+
+        data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            logger.error("OpenClaw adapter response missing choices")
+            return None
+        message = choices[0].get("message") or {}
+        content = message.get("content") or ""
+        return content.strip() or None
+    except httpx.TimeoutException:
+        logger.error("OpenClaw adapter timeout")
+        return None
+    except Exception as e:
+        logger.error("OpenClaw adapter call failed", error=str(e))
+        return None
+
+
 async def get_llm_response(
     conversation_id: str,
     user_message: str,
@@ -163,6 +225,16 @@ async def get_llm_response(
     """
     prompt = system_prompt or SYSTEM_PROMPT
     conversations.append(conversation_id, "user", user_message)
+
+    # Flow C (docs/ARCHITECTURE.md): If OpenClaw adapter is enabled, try it first.
+    # If it fails, fall back to direct gateway with tool-calling support.
+    if settings.openclaw_adapter.enabled:
+        messages = conversations.get_history(conversation_id, system_prompt=prompt)
+        content = await _call_openclaw_adapter(messages, model=model)
+        if content:
+            conversations.append(conversation_id, "assistant", content)
+            return content
+        logger.warning("OpenClaw adapter unavailable, falling back to gateway")
 
     tools = get_tool_definitions()
 
@@ -216,10 +288,6 @@ async def get_llm_response(
     return None
 
 
-# Initialize Bolt app
-app = App(token=settings.slack.bot_token)
-
-
 def _conversation_key(channel: str, thread_ts: Optional[str] = None) -> str:
     """Derive a conversation store key from channel and thread."""
     if thread_ts:
@@ -227,7 +295,6 @@ def _conversation_key(channel: str, thread_ts: Optional[str] = None) -> str:
     return channel
 
 
-@app.event("app_mention")
 def handle_app_mention(event: dict, say, client):
     """Handle @mention in channels."""
     user = event.get("user", "unknown")
@@ -275,14 +342,19 @@ def handle_app_mention(event: dict, say, client):
         say(text=response, thread_ts=thread_ts)
     else:
         say(
-            text="Sorry, I encountered an error processing your request. Please try again later.",
+            text=(
+                "Sorry, I couldn't reach the backend to process that. "
+                "Try `/brightmind status` and check `logs/slack_bot.log`."
+            ),
             thread_ts=thread_ts
         )
 
 
-@app.event("message")
 def handle_message(event: dict, say, client):
     """Handle direct messages."""
+    if _is_ignorable_message_event(event):
+        return
+
     channel_type = event.get("channel_type", "")
     if channel_type != "im":
         return
@@ -319,10 +391,15 @@ def handle_message(event: dict, say, client):
     if response:
         say(text=response)
     else:
-        say(text="Sorry, I encountered an error. Please ensure the LLM Gateway is running.")
+        hint = (
+            "OpenClaw adapter is enabled — make sure `services/openclaw_adapter` is running "
+            "(or set `OPENCLAW_ENABLED=false`)."
+            if settings.openclaw_adapter.enabled
+            else "Please ensure the LLM Gateway is running (`python services/llm_gateway/app.py`)."
+        )
+        say(text=f"Sorry, I encountered an error. {hint} You can also run `/brightmind status`.")
 
 
-@app.command("/brightmind")
 def handle_command(ack, command: dict, say):
     """Handle slash command."""
     ack()
@@ -406,10 +483,24 @@ You can also DM me or @mention me in channels!"""
             say(text="Sorry, I couldn't process that request.")
 
 
-@app.error
 def global_error_handler(error, body, logger):
     """Global error handler."""
     logger.error("Unhandled error", error=str(error), body=body)
+
+
+def build_bolt_app() -> App:
+    """Create and configure the Slack Bolt App instance.
+
+    Important: App initialization triggers an auth.test call. We build the app
+    only after validating that tokens are present so misconfiguration produces
+    a clear, deterministic error instead of crashing at import time.
+    """
+    bolt_app = App(token=settings.slack.bot_token)
+    bolt_app.event("app_mention")(handle_app_mention)
+    bolt_app.event("message")(handle_message)
+    bolt_app.command("/brightmind")(handle_command)
+    bolt_app.error(global_error_handler)
+    return bolt_app
 
 
 def main():
@@ -436,6 +527,14 @@ def main():
     
     if settings.slack.socket_mode:
         logger.info("Starting Socket Mode handler")
+        try:
+            app = build_bolt_app()
+        except Exception as exc:
+            logger.error("Failed to initialize Slack app", error=str(exc))
+            print("ERROR: Failed to initialize Slack app. Check SLACK_BOT_TOKEN validity and Slack connectivity.")
+            print(f"Details: {exc}")
+            sys.exit(1)
+
         handler = SocketModeHandler(app, settings.slack.app_token)
         handler.start()
     else:
