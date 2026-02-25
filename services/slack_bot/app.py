@@ -24,7 +24,6 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from common.config import get_settings
 from common.conversation_store import ConversationStore
 from common.logger import configure_logging, get_logger
-from common.message_id import generate_message_id
 
 # Configure logging
 settings = get_settings()
@@ -394,7 +393,7 @@ You can also DM me or @mention me in channels!"""
         status = asyncio.run(check_status())
         say(text=f"*BrightMind Status*\n{status}")
     elif text.startswith("model "):
-        model_name = text[6:].strip()
+        _model_name = text[6:].strip()  # noqa: F841
         say(text=f"Model switching not yet implemented. Current: {settings.ollama.default_model}")
     else:
         # Treat as a query
